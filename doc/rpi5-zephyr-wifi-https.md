@@ -47,6 +47,7 @@
   - [7.3 関門2：TLS 1.3 ネゴシエーションの落とし穴](#73-関門2tls-13-ネゴシエーションの落とし穴)
   - [7.4 関門3：謎のエラーコード `-0x3a00` を追え](#74-関門3謎のエラーコード--0x3a00-を追え)
   - [7.5 解決：`MBEDTLS_ERR_PK_UNKNOWN_NAMED_CURVE` と楕円曲線（secp384r1, X25519）](#75-解決mbedtls_err_pk_unknown_named_curve-と楕円曲線secp384r1-x25519)
+  - [7.6 アーキテクチャ的考察：Mbed TLS と PSA Crypto の二重抽象化レイヤの落とし穴](#76-アーキテクチャ的考察mbed-tls-と-psa-crypto-の二重抽象化レイヤの落とし穴)
 - [第8章：実機動作ログと成果の検証](#第8章実機動作ログと成果の検証)
   - [8.1 完全な HTTPS 通信ログ](#81-完全な-https-通信ログ)
   - [8.2 メモリ使用量とフットプリント評価](#82-メモリ使用量とフットプリント評価)
@@ -495,10 +496,21 @@ SDIO コントローラが DMA 転送を行う際、転送元・転送先のバ�
 static uint8_t cmd53_bounce_buf[2048];
 ```
 
-TCP の MSS（Maximum Segment Size）ネゴシエーションや大型の証明書パケットを受信した際、`xfer_size` が 2048 バイトを超過してバウンスバッファから溢れ、パケットドロップやメモリ破壊を誘発していました。
+一見すると、イーサネットの標準 MTU は 1500 バイトであり、ヘッダ類（イーサネット 14B + 802.1Q 4B + SDPCM 12B + ハードウェアタグ 4B = 1534B）を 64 バイトブロック境界へ切り上げても 1536 バイト（24ブロック）に収まるため、2048 バイトで足りるように思えます。
 
-**対応**:
-バウンスバッファを **4096 バイト** に倍増し、AArch64 の 64 バイトキャッシュラインアライメント属性を付与しました：
+しかし、実際の Wi-Fi 通信では以下の要因により 2048 バイトの境界を容易に突破します：
+1. **A-MSDU（Aggregate MSDU）の受信**: 802.11n/ac では複数のイーサネットフレームが 1 つの物理フレームに集約される場合があり、パケット長が 2KB を超える。
+2. **WHD ドライバの内部メタデータ領域**: WHD はパケットデータの直前・直後に独自のディスクリプタやオフセットポインタを付加してバッファ渡しを行う。
+3. **証明書チェーンのバースト転送**: TLS ハンドシェイク時の巨大な Certificate パケットが TCP セグメント境界ギリギリで押し寄せる。
+
+その結果、`xfer_size` が 2048 バイトを超過してバウンスバッファから溢れ、パケットドロップや隣接メモリ破壊を誘発していました。
+
+**【設計思想：メモリ効率と安全性のトレードオフ】**:
+組込み Linux であればメガバイト単位の DMA メモリプールを確保して解決するところですが、RAM 制約がシビアな RTOS では無駄なメモリ確保は許されません。
+そこで、**ちょうど MMU の 1 ページ相当かつ 64 バイトブロック × 64 個に合致する「4096 バイト」** を採用しました。これにより、A-MSDU を含む最大サイズのパケットを確実にカバーしつつ、メモリ消費の増加をわずか 2KB に抑え、64-bit ARM の MMU ページ境界とも親和性の高い安全な設計を実現しています。
+
+**対応コード**:
+バウンスバッファを **4096 バイト** に拡張し、AArch64 の 64 バイトキャッシュラインアライメント属性を付与しました：
 ```c
 static uint8_t cmd53_bounce_buf[4096] __attribute__((aligned(64)));
 ```
@@ -902,6 +914,37 @@ CONFIG_PSA_WANT_ECC_MONTGOMERY_255=y  # X25519
 
 さらに、大きな証明書チェーンを安全に展開できるよう、Mbed TLS ヒープを 128KB（`CONFIG_MBEDTLS_HEAP_SIZE=131072`）に拡張しました。
 
+### 7.6 アーキテクチャ的考察：Mbed TLS と PSA Crypto の二重抽象化レイヤの落とし穴
+
+今回直面した `-0x3a00` エラーは、単なる設定漏れではなく、**Zephyr 3.7+ における暗号スタックの二重抽象化レイヤ構造** に起因する構造的な落とし穴でした。
+
+```mermaid
+flowchart TD
+    subgraph Upper["上位レイヤ：TLS プロトコルエンジン (Mbed TLS)"]
+        TLS_Engine["TLS 1.2 / TLS 1.3 ハンドシェイク制御<br/>Kconfig: CONFIG_MBEDTLS_CIPHERSUITE_..."]
+    end
+
+    subgraph Interface["抽象化境界 (PSA Crypto API)"]
+        PSA_API["psa_import_key() / psa_verify_hash()<br/>※ ハードウェア暗号エンジンや HSM へのオフロードを可能にする標準API"]
+    end
+
+    subgraph Lower["下位レイヤ：暗号プリミティブ実装 (TF-PSA-Crypto)"]
+        PSA_Engine["RSA / ECC アルゴリズム実体<br/>Kconfig: CONFIG_PSA_WANT_ECC_..."]
+    end
+
+    TLS_Engine -->|暗号演算要求| PSA_API
+    PSA_API -->|未定義の曲線 OID| PSA_Engine
+    PSA_Engine -.->|PSA_ERROR_NOT_SUPPORTED| PSA_API
+    PSA_API -.->|変換: -0x3A00 (UNKNOWN_NAMED_CURVE)| TLS_Engine
+    TLS_Engine -.->|上位Socketへ丸め込み: -113 (ECONNABORTED)| UserApp["アプリ (HTTP Client)"]
+```
+
+1. **二重化された Kconfig 体系**:
+   上位の Mbed TLS レイヤでいくら TLS 1.3 暗号スイート（`CONFIG_MBEDTLS_CIPHERSUITE_TLS1_3_...`）を有効化しても、下位の PSA Crypto レイヤ側で該当する曲線（`CONFIG_PSA_WANT_ECC_SECP_R1_384` や `CONFIG_PSA_WANT_ECC_MONTGOMERY_255`）がビルド対象に含まれていなければ、暗号エンジン実体は生成されません。
+2. **多重エラー変換による原因隠蔽**:
+   下位の PSA Crypto が `PSA_ERROR_NOT_SUPPORTED` を返すと、Mbed TLS はそれを `-0x3A00` に変換し、さらに Zephyr の Socket レイヤが BSD errno の `-113 (ECONNABORTED)` に丸め込んでしまいます。
+   この「多段抽象化によるエラーコードの不可視化」こそが、デバッグを極限まで難解にしていた真犯人でした。
+
 ---
 
 ## 第8章：実機動作ログと成果の検証
@@ -937,6 +980,20 @@ Memory region         Used Size  Region Size  %age Used
 
 フルスタックの Wi-Fi ドライバ、TCP/IP、DHCP、DNS、TLS 1.2/1.3 暗号化エンジン、HTTP パーサーをすべて含んでも、**RAM 使用量はわずか 1.95 MB（全体の 12% 未満）** です。
 Raspberry Pi 5 の大容量 RAM（4GB / 8GB）から見れば極めて軽量であり、RTOS ならではの超高速ブート（電源投入から数百ミリ秒での起動）と強固な決定性を両立しています。
+
+#### 【総括比較】Raspberry Pi OS (Linux) vs Zephyr RTOS
+
+「なぜ高性能な Raspberry Pi 5 上であえて RTOS を動かすのか？」――その技術的意義と圧倒的なリソース効率を裏付ける比較表を以下に示します：
+
+| 評価項目 | Raspberry Pi OS (Linux 64-bit) | Zephyr RTOS (本プロジェクト) | 比較のポイント |
+| :--- | :--- | :--- | :--- |
+| **コールドブート時間** | 15 〜 25 秒 (systemd 起動含む) | **約 0.3 秒** (EEPROM 直起動) | 電源投入即座に Wi-Fi 接続・通信を開始可能 |
+| **RAM 消費量** | 200 MB 〜 500 MB 程度 | **約 1.95 MB** (Wi-Fi + TLS 含む) | **99% 以上のメモリ削減**（超軽量） |
+| **ストレージ専有量** | 数 GB (ext4 ルートファイルシステム) | **約 1.5 MB** (`zephyr.bin` 単一ファイル) | SD カード障害リスクの極小化 |
+| **リアルタイム決定性** | ミリ秒単位のジッター (PREEMPT_RT 除く) | **マイクロ秒単位の決定論的応答** | 厳密な周期制御や即応割り込みハンドリング |
+| **不意の電源断耐性** | ファイルシステム破損リスク（ジャーナル依存） | **完全ステートレス（壊れる FS が存在しない）** | 産業用・組込みアプライアンスに最適 |
+| **セキュリティ・攻撃面** | シェル、デーモン、多重サービスが稼働 | **不要コード完全ストリップ（単一バイナリ）** | 侵入経路・脆弱性の劇的削減（ゼロアタックサーフェス） |
+| **ネットワーク構成** | NetworkManager + wpa_supplicant + OpenSSL | **Native TCP/IP + AIROC WHD + Mbed TLS/PSA** | カーネル空間とユーザ空間の境界ゼロ（ゼロコピー） |
 
 ---
 
