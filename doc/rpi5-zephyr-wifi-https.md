@@ -90,6 +90,53 @@ Linux では `curl` や `wget` コマンド1つで簡単に取得できる HTTPS
 
 ## 第1章：Raspberry Pi 5 と Zephyr RTOS のアーキテクチャ
 
+本プロジェクトでは、Raspberry Pi 5 上で Zephyr RTOS をベアメタル起動し、Infineon CYW43455 との SDIO 通信からネイティブ TCP/IP、そして TLS 1.3 による暗号化通信までを完全統合しました。
+全体を構成するハードウェア、ドライバ、ネットワーク、セキュリティ、アプリケーションの階層構造（システム全体アーキテクチャ）を下図に示します。
+
+```mermaid
+flowchart TD
+    subgraph App["Application Layer"]
+        HTTP["HTTP Client (net http get)"]
+        Shell["Zephyr Shell & Commands"]
+    end
+
+    subgraph Security["Security & Crypto Layer"]
+        TLS["TLS 1.2 / TLS 1.3 (Mbed TLS)"]
+        PSA["PSA Crypto Engine (NIST Curves / X25519)"]
+    end
+
+    subgraph NetStack["Native Network Stack"]
+        Socket["BSD / POSIX Socket API"]
+        DNS["DNS Resolver"]
+        TCP["TCP / IP (IPv4, DHCP)"]
+        L2["Net L2 (Ethernet / Wi-Fi Mgmt)"]
+    end
+
+    subgraph Drivers["Driver & Hardware Subsystem"]
+        AIROC["Infineon AIROC Wi-Fi (WHD)"]
+        SDHC["BCM2712 SDHC Driver (sdhc_bcm2712.c)"]
+    end
+
+    subgraph HW["Hardware (Raspberry Pi 5)"]
+        RPi5["SoC: BCM2712 (Cortex-A76 Quad-core 64-bit)"]
+        Bus[("SDIO 4-bit / 50MHz Bus")]
+        CYW["Wi-Fi Module: Infineon CYW43455"]
+    end
+
+    App --> Socket
+    Socket --> TLS
+    TLS --> PSA
+    TLS --> TCP
+    Socket --> TCP
+    Socket --> DNS
+    DNS --> TCP
+    TCP --> L2
+    L2 --> AIROC
+    AIROC --> SDHC
+    SDHC --> RPi5
+    RPi5 <==> Bus <==> CYW
+```
+
 ### 1.1 BCM2712 (Cortex-A76 AArch64) の特徴
 
 Raspberry Pi 5 に搭載されている SoC「BCM2712」は、ARM Cortex-A76 を4コア搭載するパワフルな 64-bit プロセッサです。従来の Cortex-M などのマイコンと異なり、以下の特徴を持ちます：
@@ -128,6 +175,22 @@ Linux におけるデバイスツリー（`.dtb`）は、OS 起動時にブー�
 3. C 言語のドライバコードは、実行時ではなく **コンパイル時に直値としてこれらを参照** します。
 
 これにより、**ランタイムメモリ消費量ゼロ、探索オーバーヘッドゼロ、デッドコードの完全ストリッピング（不要なドライバが 1 バイトもバイナリに残らない）** という、リソースの制約が厳しい RTOS に最適なゼロコスト抽象化を実現しています。
+
+```mermaid
+flowchart LR
+    subgraph Linux["Linux DTS モデル（実行時パースとメモリ消費）"]
+        L_DTS[".dts"] --> L_DTC["dtc (コンパイラ)"]
+        L_DTC --> L_DTB[".dtb (バイナリブロブ)"]
+        L_DTB -->|ブートローダー経由でRAM展開| L_RAM["RAM上のDTB領域"]
+        L_RAM -->|カーネル起動時に動的パース・探索| L_Driver["デバイスドライバ<br/>(ヒープ消費 & プローブ時間)"]
+    end
+
+    subgraph Zephyr["Zephyr DeviceTree モデル（ビルド時ゼロコスト抽象化）"]
+        Z_DTS[".dts / .dtsi"] --> Z_Py["Python (gen_defines.py)"]
+        Z_Py --> Z_H["devicetree_generated.h<br/>(#define DT_N_S_...)"]
+        Z_H -->|C言語プリプロセッサによる静的直値展開| Z_Driver["Cドライバコード<br/>(不要コードは完全ストリップ)"]
+    end
+```
 
 ### 2.2 本プロジェクトにおけるデバイスツリー設計の実例
 
@@ -303,23 +366,32 @@ static inline void sdhc_bcm2712_write(const struct device *dev, uint32_t val, ui
 
 SD メモリカードと異なり、SDIO カード（I/O デバイス）は独自の列挙シーケンスを持ちます。CYW43455 がホストと正常に対話できるようになるまでの通信シーケンスは以下の通りです：
 
-```
-Host (BCM2712 SDHC)                          Card (CYW43455)
-      |                                              |
-      |--------------- CMD0 (Reset) ---------------->|  (カードをリセット)
-      |                                              |
-      |---------- CMD5 (IO_SEND_OP_COND, 0) --------->|  (電圧範囲・ファンクション数問い合わせ)
-      |<--------- Response R4 (OCR: 3.3V, 3 Funcs) --|
-      |                                              |
-      |----- CMD5 (IO_SEND_OP_COND, VDD_3.3V) ------>|  (動作電圧確定・初期化要求)
-      |<--------- Response R4 (Ready bit = 1) -------|  (カードの I/O 準備完了)
-      |                                              |
-      |--------- CMD3 (SEND_RELATIVE_ADDR) --------->|  (RCA 要求)
-      |<--------- Response R6 (New RCA: 0x0001) -----|  (カードアドレス確定)
-      |                                              |
-      |--------- CMD7 (SELECT_CARD, RCA=0x0001) ---->|  (カードを選択)
-      |<--------- Response R1b (Card Selected) ------|  (カードが TRAN 状態へ移行)
-      |                                              |
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Host as BCM2712 SDHC (Host)
+    participant Card as CYW43455 (Card)
+
+    Note over Host,Card: 400 kHz 低速初期化フェーズ
+    Host->>Card: CMD0 (GO_IDLE_STATE)
+    Note right of Card: バスとカード状態をリセット
+
+    Host->>Card: CMD5 (IO_SEND_OP_COND, arg=0)
+    Card-->>Host: Response R4 (OCR: 3.3V, 3 Functions)
+
+    loop Ready ビット待機ポーリング
+        Host->>Card: CMD5 (IO_SEND_OP_COND, VDD=3.3V)
+        Card-->>Host: Response R4 (Ready=1, I/O準備完了)
+    end
+
+    Host->>Card: CMD3 (SEND_RELATIVE_ADDR)
+    Card-->>Host: Response R6 (RCA = 0x0001 取得)
+
+    Host->>Card: CMD7 (SELECT_CARD, RCA=0x0001)
+    Card-->>Host: Response R1b (Card Selected)
+    Note over Host,Card: カードが TRAN（データ転送可能）状態へ遷移！
+
+    Note over Host,Card: 以降、CMD52 経由で 50MHz High-Speed & 4-bit バス幅へ切替
 ```
 
 1. **CMD0 (GO_IDLE_STATE)**: バスをリセットし、カードを初期状態にします。
@@ -331,7 +403,25 @@ Host (BCM2712 SDHC)                          Card (CYW43455)
 
 TRAN 状態に遷移した直後の CYW43455 は、依然として **1-bit バス幅 / 400kHz** で動作しています。これらを高速通信に切り替えるため、**CCCR（Card Common Control Registers）** と呼ばれる Function 0（F0）の専用レジスタ空間を設定します。
 
-CYW43455 は以下の 3 つのファンクションを持ちます：
+CYW43455 は以下の 3 つのファンクションを持ち、ホストとの役割分担が明確に分離されています：
+
+```mermaid
+flowchart TD
+    subgraph Host["ホスト側：Raspberry Pi 5 (BCM2712 SDHC)"]
+        SDHC_Drv["SDHC ホストドライバ (sdhc_bcm2712.c)"]
+    end
+
+    subgraph CYW43455["デバイス側：Infineon CYW43455 (SDIO)"]
+        F0["Function 0 (F0): CCCR / FBR<br/>・バス幅切替 (1-bit / 4-bit)<br/>・クロック切替 (50MHz High-Speed)<br/>・F1/F2 の Enable / Ready 監視"]
+        F1["Function 1 (F1): Backplane Access<br/>・ファームウェア (43455-fmac.bin) 転送<br/>・CLM BLOB (Country Code Matrix) 転送<br/>・ChipCommon / Core レジスタアクセス"]
+        F2["Function 2 (F2): WLAN Data Path<br/>・Wi-Fi イーサネットフレーム送受信<br/>・64バイト固定ブロック転送 (CMD53)"]
+    end
+
+    SDHC_Drv <==>|"CMD52 (1 Byte Direct R/W)"| F0
+    SDHC_Drv <==>|"CMD53 (Byte/Block 転送)"| F1
+    SDHC_Drv <==>|"CMD53 (Block Mode / 64B)"| F2
+```
+
 - **Function 0 (F0)**: SDIO 共通制御レジスタ（CCCR/FBR）。バス幅やクロック、割り込みの制御。
 - **Function 1 (F1)**: Infineon バックプレーンアクセス。SoC 内部レジスタ、ChipCommon、RAM へのアクセス。
 - **Function 2 (F2)**: WLAN データ転送用。Wi-Fi パケット（SDPCM）の送受信を行う。
@@ -557,6 +647,37 @@ Zephyr のソケットサービスディスパッチャスレッド（`service_t
 
 その結果、直下に配置されていた `shell_uart_stack` のフレームを突き破り、リターンアドレスを破壊していたのです。
 
+```mermaid
+flowchart TD
+    subgraph Memory["SRAM メモリマップ（高位アドレスから低位アドレスへ伸長）"]
+        direction TB
+
+        T_Svc["[0x0032c500] service_thread_stack 上限"]
+        Svc["service_thread_stack (わずか 1200 Bytes)<br/>※ DNS パケット受信コールバックが多重ネストで走行"]
+        B_Svc["[0x0032c000] service_thread_stack 底（境界）"]
+
+        Overflow["💥 1200バイトをあっという間に突破して下方へオーバーフロー！<br/>(64-bit ARM の巨大スタックフレーム + 0xAA パターンが侵食)"]
+
+        T_Shell["[0x0032c000] shell_uart_stack 上限（境界）"]
+        ShellFrame["shell_uart のスタックフレーム<br/>・保存されていた関数リターンアドレス (lr) が 0x338370 で上書きされる<br/>・退避レジスタ x8〜x18 が 0xAAAAAAAAAAAAAAAA で壊滅"]
+        Shell["shell_uart_stack (16 KB)"]
+        B_Shell["[0x00328000] shell_uart_stack 底"]
+    end
+
+    T_Svc --> Svc --> B_Svc
+    B_Svc -.-> Overflow
+    Overflow -. 侵食 .-> T_Shell
+    T_Shell --> ShellFrame --> Shell --> B_Shell
+
+    subgraph Abort["CPU 例外（Instruction Abort）の炸裂"]
+        CPU["shell_uart 側が関数から復帰（ret）を実行"]
+        PTE["MMU ページテーブル走査 (PTE Walk):<br/>復帰先 0x338370 は AP=RW (データ/スタック) かつ XN (実行禁止)"]
+        Panic["💥 Instruction Abort (EC: 0x21) 発生！<br/>FAR=0x338370, ELR=0x338370 でカーネルパニック"]
+    end
+
+    ShellFrame --> CPU --> PTE --> Panic
+```
+
 ### 5.4 64-bit 環境に最適化したスタックサイズ設計
 
 この問題を根治するため、ネットワークおよびシステム全体のスタックサイズを 64-bit ARM 向けに再設計・拡張しました：
@@ -632,6 +753,46 @@ TCP 3-way ハンドシェイクが成功し、Google サーバーから `HTTP/1.
 ## 第7章：【激闘録2】HTTPS（TLS 1.2 / TLS 1.3）の暗号化の壁を突破する
 
 現代のインターネットでは、ほぼすべての Web サービスが HTTPS（TLS 暗号化）を必須としています。ここからが真の難所でした。
+
+本章で立ちふさがった3つの致命的関門（RSA 暗号スイート不足による切断、TLS 1.3 スイート空トラップ、謎のエラー `-0x3a00` による証明書パース破棄）と、正常なハンドシェイク成立までのシーケンス全貌を下図に示します。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Client as Zephyr HTTP Client (RPi5)
+    participant Server as Google Web Server (:443)
+
+    Client->>Server: TCP SYN
+    Server-->>Client: TCP SYN-ACK
+    Client->>Server: TCP ACK (TCP 接続確立)
+
+    rect rgb(255, 235, 235)
+        Note over Client: 【関門2】TLS 1.3 暗号スイート空トラップ
+        Client->>Server: ClientHello (TLS 1.3 宣言 + 支持暗号一覧)
+        Note left of Client: TLS 1.3 を有効化していたが、<br/>スイート Kconfig 未選択で不一致切断
+    end
+
+    rect rgb(255, 240, 220)
+        Note over Client,Server: 【関門1】RSA 非対応による拒絶 (-113)
+        Server-->>Client: ServerHello (選定暗号通知)
+        Server-->>Client: Certificate (RSA 2048/4096 bit 提示)
+        Note left of Client: クライアントが ECDSA のみ対応だったため<br/>互換性不一致で即時 RST 切断 (-113)
+    end
+
+    rect rgb(240, 245, 255)
+        Note over Client: 【関門3】謎のエラー -0x3a00 の正体
+        Server-->>Client: KeyShare / Certificate Chain (secp384r1 / X25519)
+        Note left of Client: PSA Crypto に secp384r1/X25519 未定義のため<br/>MBEDTLS_ERR_PK_UNKNOWN_NAMED_CURVE で破棄
+    end
+
+    rect rgb(235, 255, 235)
+        Note over Client,Server: 全関門突破後：正常な通信確立
+        Client->>Server: Finished
+        Server-->>Client: Finished (TLS セッション確立)
+        Client->>Server: HTTP GET /
+        Server-->>Client: HTTP/1.1 301 Moved Permanently (通信大成功！)
+    end
+```
 
 ### 7.1 Mbed TLS & PSA Crypto の組み合わせ
 
