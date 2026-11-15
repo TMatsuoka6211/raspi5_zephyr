@@ -1,0 +1,14 @@
+flowchart TD
+    subgraph Host["ホスト側：Raspberry Pi 5 (BCM2712 SDHC)"]
+        SDHC_Drv["SDHC ホストドライバ (sdhc_bcm2712.c)"]
+    end
+
+    subgraph CYW43455["デバイス側：Infineon CYW43455 (SDIO)"]
+        F0["Function 0 (F0): CCCR / FBR<br/>・バス幅切替 (1-bit / 4-bit)<br/>・クロック切替 (50MHz High-Speed)<br/>・F1/F2 の Enable / Ready 監視"]
+        F1["Function 1 (F1): Backplane Access<br/>・ファームウェア (43455-fmac.bin) 転送<br/>・CLM BLOB (Country Code Matrix) 転送<br/>・ChipCommon / Core レジスタアクセス"]
+        F2["Function 2 (F2): WLAN Data Path<br/>・Wi-Fi イーサネットフレーム送受信<br/>・64バイト固定ブロック転送 (CMD53)"]
+    end
+
+    SDHC_Drv <==>|"CMD52 (1 Byte Direct R/W)"| F0
+    SDHC_Drv <==>|"CMD53 (Byte/Block 転送)"| F1
+    SDHC_Drv <==>|"CMD53 (Block Mode / 64B)"| F2

@@ -1,0 +1,13 @@
+flowchart LR
+    subgraph Linux["Linux DTS モデル（実行時パースとメモリ消費）"]
+        L_DTS[".dts"] --> L_DTC["dtc (コンパイラ)"]
+        L_DTC --> L_DTB[".dtb (バイナリブロブ)"]
+        L_DTB -->|ブートローダー経由でRAM展開| L_RAM["RAM上のDTB領域"]
+        L_RAM -->|カーネル起動時に動的パース・探索| L_Driver["デバイスドライバ<br/>(ヒープ消費 & プローブ時間)"]
+    end
+
+    subgraph Zephyr["Zephyr DeviceTree モデル（ビルド時ゼロコスト抽象化）"]
+        Z_DTS[".dts / .dtsi"] --> Z_Py["Python (gen_defines.py)"]
+        Z_Py --> Z_H["devicetree_generated.h<br/>(#define DT_N_S_...)"]
+        Z_H -->|C言語プリプロセッサによる静的直値展開| Z_Driver["Cドライバコード<br/>(不要コードは完全ストリップ)"]
+    end

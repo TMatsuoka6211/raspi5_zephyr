@@ -1,0 +1,18 @@
+flowchart TD
+    subgraph Upper ["上位レイヤ：TLS プロトコルエンジン (Mbed TLS)"]
+        TLS_Engine["TLS 1.2 / TLS 1.3 ハンドシェイク制御<br/>Kconfig: CONFIG_MBEDTLS_CIPHERSUITE_..."]
+    end
+
+    subgraph Interface ["抽象化境界 (PSA Crypto API)"]
+        PSA_API["psa_import_key() / psa_verify_hash()<br/>※ ハードウェア暗号エンジンや HSM へのオフロードを可能にする標準API"]
+    end
+
+    subgraph Lower ["下位レイヤ：暗号プリミティブ実装 (TF-PSA-Crypto)"]
+        PSA_Engine["RSA / ECC アルゴリズム実体<br/>Kconfig: CONFIG_PSA_WANT_ECC_..."]
+    end
+
+    TLS_Engine --> PSA_API
+    PSA_API --> PSA_Engine
+    PSA_Engine -.-> PSA_API
+    PSA_API -.-> TLS_Engine
+    TLS_Engine -.-> UserApp["アプリ (HTTP Client)"]

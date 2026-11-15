@@ -1,0 +1,21 @@
+# Re:VIEW 章構成定義ファイル (catalog.yml)
+# ※ config.yml の contentdir: src 設定により、src/ ディレクトリ内のファイル名を指定します。
+
+PREDEF:
+  - predef.re
+
+CHAPS:
+  - ch01_arch.re
+  - ch02_dts.re
+  - ch03_sdio.re
+  - ch04_l3_l4.re
+  - ch05_stack.re
+  - ch06_http.re
+  - ch07_tls.re
+  - ch08_verify.re
+
+APPENDIX:
+  - appendix.re
+
+POSTDEF:
+  - postdef.re

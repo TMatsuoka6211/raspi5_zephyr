@@ -1,0 +1,23 @@
+services:
+  pdf:
+    image: vvakame/review:latest
+    working_dir: /work
+    volumes:
+      - .:/work
+    command: /bin/bash -ci "review-pdfmaker config.yml"
+
+  epub:
+    image: vvakame/review:latest
+    working_dir: /work
+    volumes:
+      - .:/work
+    command: /bin/bash -ci "review-epubmaker config.yml"
+
+  shell:
+    image: vvakame/review:latest
+    working_dir: /work
+    volumes:
+      - .:/work
+    stdin_open: true
+    tty: true
+    command: /bin/bash

@@ -1,0 +1,55 @@
+# Re:VIEW 書籍設定ファイル (config.yml)
+review_version: 5.0
+
+# ブック名（出力されるPDF/EPUBのファイル名ベース）
+bookname: raspi5-zephyr-wifi-https
+
+# 記述言語
+language: ja
+
+# 書名・サブタイトル
+booktitle: "Raspberry Pi 5 × Zephyr RTOS で挑む Wi-Fi & HTTPS通信 完全攻略本"
+subtitle: "― BCM2712 SDIO から TLS 1.3 / HTTP Client 実装と泥沼デバッグの全記録 ―"
+
+# 著者・発行者情報（奥付に表示）
+aut: ["TMatsuoka6211"]
+pbl: "M-崖っぷちテクノロジー"
+edt: ["TMatsuoka6211"]
+prt: "技術書典21"
+
+# 発行日・版数履歴
+date: 2026-11-20
+history:
+  - ["2026-11-20 技術書典21 初版第1刷発行"]
+
+# 権利表記
+rights: "(C) 2026 TMatsuoka6211"
+
+# ディレクトリ・構成ファイル設定
+catalogfile: catalog.yml
+contentdir: src
+imagedir: images
+
+# 扉・目次・奥付・表紙の生成設定
+coverimage: cover.jpg
+titlepage: true
+toc: true
+toclevel: 3
+colophon: true
+secnolevel: 3
+
+# コードハイライト設定（Rouge使用）
+highlight:
+  html: "rouge"
+  latex: "listings"
+
+# LaTeX (PDF出力) 用の組版・判型設定 (Re:VIEW 5.x 標準)
+# paper=b5: B5判（技術同人誌の標準サイズ） / a5: A5判
+# openany: 章の始まりを左右どちらのページからでも開始可能にする（同人誌での白紙ページ節約）
+# media=print: 印刷向け / media=ebook: 電子書籍向け
+texcommand: "uplatex"
+texoptions: "-interaction=nonstopmode -file-line-error -halt-on-error"
+dvicommand: "dvipdfmx"
+dvioptions: "-d 5 -z 9"
+texdocumentclass: ["review-jsbook", "media=print,paper=b5,serial_pagination=true,openany,cover=true,cover_fit_page=true"]
+texstyle: ["reviewmacro"]

@@ -1,0 +1,16 @@
+flowchart TD
+    Root["DNS レスポンス受信時のスタック破壊と CPU 例外メカニズム"]
+    subgraph Mem ["1. SRAM メモリ破壊プロセス"]
+        Svc["[0x32c500〜0x32c000] service_thread_stack (1200B)"]
+        Ov["💥 1200B 突破・下方オーバーフロー (0xAA で侵食)"]
+        Shell["[0x32c000〜0x328000] shell_uart_stack<br/>戻り先 lr が 0x338370 に上書き破壊"]
+        Svc --> Ov --> Shell
+    end
+    subgraph Cpu ["2. CPU 例外 (Instruction Abort) 発生"]
+        Ret["shell_uart 関数復帰 (ret) → 0x338370 へジャンプ"]
+        PTE["MMU PTE Walk: RW (データ) かつ XN (実行禁止)"]
+        Abort["💥 Instruction Abort (EC: 0x21) 発生でシステム停止"]
+        Ret --> PTE --> Abort
+    end
+    Root --> Mem
+    Root --> Cpu

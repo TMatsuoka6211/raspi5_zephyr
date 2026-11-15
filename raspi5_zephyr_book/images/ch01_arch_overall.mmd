@@ -1,0 +1,21 @@
+flowchart TD
+    HTTP["HTTP Client / Zephyr Shell<br/>(Application Layer)"]
+    Socket["BSD / POSIX Socket API"]
+    TLS["TLS 1.2 / 1.3 (Mbed TLS)"]
+    PSA["PSA Crypto Engine<br/>(NIST Curves / X25519)"]
+    DNS["DNS Resolver"]
+    TCP["TCP / IPv4 / DHCP"]
+    AIROC["Infineon AIROC Wi-Fi (WHD)<br/>& Net L2"]
+    SDHC["BCM2712 SDHC Driver<br/>(sdhc_bcm2712.c)"]
+    HW["Hardware: RPi 5 (BCM2712) ◀══ SDIO 4-bit / 50MHz ══▶ CYW43455"]
+
+    HTTP --> Socket
+    Socket --> TLS
+    TLS --> PSA
+    Socket --> DNS
+    TLS --> TCP
+    DNS --> TCP
+    Socket --> TCP
+    TCP --> AIROC
+    AIROC --> SDHC
+    SDHC --> HW

@@ -1,0 +1,14 @@
+% for user-defined macro
+
+% 1. すべての図をアスペクト比を維持したまま、用紙版面（幅100%・高さ72%以内）の最大サイズに自動調整
+\RequirePackage{adjustbox}
+\renewcommand{\reviewincludegraphics}[2][]{%
+  \adjustimage{max width=\textwidth,max height=0.72\textheight,keepaspectratio}{#2}%
+}
+
+% 2. ヘッダー（柱）の章・節タイトル衝突を防止する設定
+% 偶数ページ(E)の左上に章タイトル、奇数ページ(O)の右上に節タイトルを配置し、文字サイズを小さめ(\footnotesize)にする
+\setlength{\headheight}{24pt}
+\fancyhead{}
+\fancyhead[LE]{\gtfamily\sffamily\bfseries\footnotesize\upshape \leftmark}
+\fancyhead[RO]{\gtfamily\sffamily\bfseries\footnotesize\upshape \rightmark}

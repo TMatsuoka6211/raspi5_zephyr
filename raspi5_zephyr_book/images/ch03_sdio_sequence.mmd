@@ -1,0 +1,25 @@
+sequenceDiagram
+    autonumber
+    participant Host as BCM2712 SDHC (Host)
+    participant Card as CYW43455 (Card)
+
+    Note over Host,Card: 400 kHz 低速初期化フェーズ
+    Host->>Card: CMD0 (GO_IDLE_STATE)
+    Note right of Card: バスとカード状態をリセット
+
+    Host->>Card: CMD5 (IO_SEND_OP_COND, arg=0)
+    Card-->>Host: Response R4 (OCR: 3.3V, 3 Functions)
+
+    loop Ready ビット待機ポーリング
+        Host->>Card: CMD5 (IO_SEND_OP_COND, VDD=3.3V)
+        Card-->>Host: Response R4 (Ready=1, I/O準備完了)
+    end
+
+    Host->>Card: CMD3 (SEND_RELATIVE_ADDR)
+    Card-->>Host: Response R6 (RCA = 0x0001 取得)
+
+    Host->>Card: CMD7 (SELECT_CARD, RCA=0x0001)
+    Card-->>Host: Response R1b (Card Selected)
+    Note over Host,Card: カードが TRAN（データ転送可能）状態へ遷移！
+
+    Note over Host,Card: 以降、CMD52 経由で 50MHz High-Speed & 4-bit バス幅へ切替
